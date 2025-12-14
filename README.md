@@ -41,9 +41,7 @@ It does **not** crash or lie.
 
 ---
 
-## 🔗 Source Code
-
-> Add your repository URL here    
+## 🔗 Source Code    
 > `https://github.com/I-Am-Krishn/youtube-downloader/`
 
 ---
