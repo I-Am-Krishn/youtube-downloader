@@ -1,205 +1,145 @@
-from fastapi import FastAPI, HTTPException, Query
-from typing import Dict, Any, List
+from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.responses import JSONResponse, RedirectResponse, HTMLResponse
 import yt_dlp
 import time
 
 app = FastAPI(
     title="YouTube Intelligence API",
-    version="3.2",
-    description="""
-🚀 YouTube Intelligence API (Flag-Based)
-
-• Best-resolution download included by default
-• Optional heavy data via flags
-• Playlist support (opt-in)
-• No fake permanent links
-
-Creator: Krishn Dhola
-"""
+    version="4.1",
+    description="Direct-link YouTube downloader API | Creator: Krishn Dhola"
 )
 
-# -----------------------
-# Cache (metadata only)
-# -----------------------
-CACHE: Dict[str, Dict[str, Any]] = {}
-CACHE_TTL = 900  # 15 minutes
+# ---------------- RATE LIMIT ----------------
+RATE_LIMIT = 200
+WINDOW = 3600
+rate_store = {}
 
+@app.middleware("http")
+async def rate_limit(request: Request, call_next):
+    ip = request.client.host
+    now = time.time()
 
-# -----------------------
-# Helpers
-# -----------------------
-def is_youtube_url(url: str) -> bool:
-    return any(x in url for x in [
-        "youtube.com/watch",
-        "youtube.com/shorts",
-        "youtu.be/",
-        "youtube.com/playlist"
-    ])
+    rec = rate_store.get(ip, {"count": 0, "start": now})
+    if now - rec["start"] > WINDOW:
+        rec = {"count": 0, "start": now}
 
+    rec["count"] += 1
+    rate_store[ip] = rec
 
-def pick_best_progressive(progressive: dict):
-    best = None
-    for items in progressive.values():
-        for f in items:
-            if f.get("ext") == "mp4":
-                if not best or (f.get("height", 0) > best.get("height", 0)):
-                    best = f
-    return best
+    if rec["count"] > RATE_LIMIT:
+        return JSONResponse(status_code=429, content={"error": "Rate limit exceeded"})
 
+    return await call_next(request)
 
-def extract_single(url: str) -> Dict[str, Any]:
-    ydl_opts = {
+# ---------------- HELPERS ----------------
+def extract_info(url, flat=False):
+    opts = {
         "quiet": True,
         "no_warnings": True,
-        "noplaylist": True,
+        "extract_flat": flat,
+        "noplaylist": not flat,
     }
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        return ydl.extract_info(url, download=False)
 
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=False)
-
-    progressive = {}
-    audio_only = {}
-
+def best_video(info):
+    best = None
     for f in info.get("formats", []):
         if f.get("vcodec") != "none" and f.get("acodec") != "none":
-            progressive.setdefault(f.get("resolution"), []).append(f)
-        elif f.get("acodec") != "none":
-            audio_only.setdefault(f.get("abr"), []).append(f)
+            if not best or (f.get("height", 0) > best.get("height", 0)):
+                best = f
+    return best
 
-    return {
-        "video": {
-            "title": info.get("title"),
-            "description": info.get("description"),
-            "tags": info.get("tags") or [],
-            "thumbnail": info.get("thumbnail"),
-            "type": "shorts" if info.get("duration", 0) <= 60 else "video",
-        },
-        "streams": progressive,
-        "chapters": info.get("chapters") or [],
-        "subtitles": {
-            "manual": info.get("subtitles") or {},
-            "auto": info.get("automatic_captions") or {}
-        },
-        "stats": {
-            "views": info.get("view_count"),
-            "likes": info.get("like_count"),
-            "comments": info.get("comment_count"),
-        },
-        "creator": {
-            "channel": info.get("uploader"),
-            "channel_url": info.get("uploader_url"),
-            "subscribers": info.get("channel_follower_count"),
-        }
-    }
+# ---------------- API ----------------
+@app.get("/api/youtube/download")
+def download(url: str = Query(...)):
+    info = extract_info(url)
+    best = best_video(info)
+    if not best:
+        raise HTTPException(400, "No stream found")
 
+    # SAME behavior you already like
+    return RedirectResponse(best["url"], status_code=302)
 
-def extract_playlist(url: str) -> Dict[str, Any]:
-    ydl_opts = {
-        "quiet": True,
-        "no_warnings": True,
-        "extract_flat": True,
-    }
-
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=False)
+@app.get("/api/youtube/playlist")
+def playlist(url: str = Query(...)):
+    info = extract_info(url, flat=True)
+    entries = info.get("entries", [])[:10]
 
     videos = []
-    for entry in info.get("entries", []):
+    for v in entries:
+        vurl = f"https://youtu.be/{v['id']}"
         videos.append({
-            "title": entry.get("title"),
-            "url": entry.get("url")
+            "title": v.get("title"),
+            "link": vurl,
+            "download": f"/api/youtube/download?url={vurl}"
         })
 
     return {
-        "title": info.get("title"),
-        "count": len(videos),
+        "playlist": {
+            "title": info.get("title"),
+            "returned": len(videos),
+            "limit": 10
+        },
         "videos": videos
     }
 
+# ---------------- UI ----------------
+@app.get("/ui", response_class=HTMLResponse)
+def ui():
+    return """
+<!DOCTYPE html>
+<html>
+<head>
+<title>YouTube Downloader</title>
+<style>
+body{background:#111;color:#fff;font-family:Arial}
+.box{max-width:600px;margin:40px auto}
+input,button{width:100%;padding:12px;margin:8px 0}
+button{background:#e11;color:#fff;border:none}
+.card{background:#1c1c1c;padding:10px;margin:10px 0}
+a{color:#4af}
+small{opacity:.7}
+</style>
+</head>
+<body>
+<div class="box">
+<h2>YouTube Downloader</h2>
+<input id="url" placeholder="Paste YouTube video or playlist URL">
+<button onclick="go()">Get Download</button>
+<div id="out"></div>
+</div>
 
-# -----------------------
-# Route
-# -----------------------
-@app.get("/api/youtube")
-def youtube_api(
-    url: str = Query(...),
-    downloads: bool = False,
-    subtitles: bool = False,
-    chapters: bool = False,
-    stats: bool = False,
-    creator: bool = False,
-    playlist: bool = False,
-):
-    if not is_youtube_url(url):
-        raise HTTPException(400, "Only YouTube URLs are supported")
+<script>
+async function go(){
+  const url = document.getElementById('url').value;
+  const out = document.getElementById('out');
+  out.innerHTML = 'Loading...';
 
-    # -----------------------
-    # Playlist mode
-    # -----------------------
-    if playlist:
-        playlist_data = extract_playlist(url)
-        return {
-            "playlist": {
-                "title": playlist_data["title"],
-                "count": playlist_data["count"]
-            },
-            "videos": playlist_data["videos"],
-            "credits": {"creator": "Krishn Dhola"},
-            "_options": {
-                "playlist": "Use &playlist=true (already enabled)",
-                "note": "Per-video details require individual video requests"
-            }
-        }
+  try {
+    const r = await fetch('/api/youtube/playlist?url='+encodeURIComponent(url));
+    const d = await r.json();
 
-    # -----------------------
-    # Single video mode
-    # -----------------------
-    data = extract_single(url)
-    best = pick_best_progressive(data["streams"])
-
-    response = {
-        "title": data["video"]["title"],
-        "description": data["video"]["description"],
-        "tags": data["video"]["tags"],
-        "type": data["video"]["type"],
-        "thumbnail": data["video"]["thumbnail"],
-
-        "download": {
-            "quality": best.get("resolution") if best else None,
-            "ext": best.get("ext") if best else None,
-            "stream_url": best.get("url") if best else None
-        },
-
-        "credits": {"creator": "Krishn Dhola"},
-
-        "_options": {
-            "downloads": "Use &downloads=true to get all resolutions",
-            "subtitles": "Use &subtitles=true to get English subtitles",
-            "chapters": "Use &chapters=true to include chapters",
-            "stats": "Use &stats=true to include views & likes",
-            "creator": "Use &creator=true to include channel info",
-            "playlist": "Use &playlist=true to process entire playlist (heavy)"
-        }
-    }
-
-    if downloads:
-        response["downloads"] = data["streams"]
-
-    if subtitles:
-        response["subtitles"] = {
-            "en": {
-                "manual": [t["url"] for t in data["subtitles"]["manual"].get("en", [])],
-                "auto": [t["url"] for t in data["subtitles"]["auto"].get("en", [])]
-            }
-        }
-
-    if chapters:
-        response["chapters"] = data["chapters"]
-
-    if stats:
-        response["stats"] = data["stats"]
-
-    if creator:
-        response["creator"] = data["creator"]
-
-    return response
+    out.innerHTML = '<h3>'+d.playlist.title+'</h3>';
+    d.videos.forEach(v=>{
+      out.innerHTML += `
+      <div class="card">
+        <b>${v.title}</b><br>
+        <a href="${v.download}" target="_blank">Download</a><br>
+        <small>Opens video. Use browser download option.</small>
+      </div>`;
+    });
+  } catch {
+    out.innerHTML = `
+      <div class="card">
+        <a href="/api/youtube/download?url=${encodeURIComponent(url)}" target="_blank">
+          Download
+        </a><br>
+        <small>Opens video. Use browser download option.</small>
+      </div>`;
+  }
+}
+</script>
+</body>
+</html>
+"""
