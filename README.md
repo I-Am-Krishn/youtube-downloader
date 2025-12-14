@@ -43,9 +43,8 @@ It does **not** crash or lie.
 
 ## 🔗 Source Code
 
-> Add your repository URL here  
-> Example:  
-> `https://github.com/yourname/youtube-downloader-api`
+> Add your repository URL here    
+> `https://github.com/I-Am-Krishn/youtube-downloader/`
 
 ---
 
